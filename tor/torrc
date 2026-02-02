@@ -1,0 +1,39 @@
+# Tor Hidden Service Configuration for Dis
+# Provides anonymous .onion access
+
+# Data directory
+DataDirectory /var/lib/tor
+
+# Hidden service configuration
+HiddenServiceDir /var/lib/tor/hidden_service/
+HiddenServicePort 80 caddy:80
+HiddenServicePort 443 caddy:443
+
+# Security settings
+HiddenServiceVersion 3
+
+# Performance
+NumEntryGuards 8
+SafeSocks 1
+TestSocks 1
+
+# Logging (minimal for privacy)
+Log notice file /var/log/tor/notices.log
+
+# Circuit settings
+CircuitBuildTimeout 60
+LearnCircuitBuildTimeout 0
+
+# Disable non-anonymous connections
+DisableNetwork 0
+
+# Security hardening
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
+
+# Bridge support (uncomment if needed)
+# UseBridges 1
+# Bridge obfs4 ...
+
+# Exit policy (we're only providing hidden service, not exit)
+ExitPolicy reject *:*

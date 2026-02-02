@@ -1,0 +1,147 @@
+# ============================================
+# Dis - Caddy Reverse Proxy Configuration
+# ============================================
+
+{
+    # Global options
+    admin off
+    
+    # Email for Let's Encrypt (from environment)
+    email {$ACME_EMAIL}
+    
+    # Security
+    servers {
+        protocols h1 h2 h3
+    }
+}
+
+# Main domain configuration
+{$DOMAIN} {
+    # Enable automatic HTTPS
+    # tls internal  # Uncomment for self-signed certificates
+    
+    # Security headers
+    header {
+        # Remove server identification
+        -Server
+        
+        # Prevent clickjacking
+        X-Frame-Options "SAMEORIGIN"
+        
+        # XSS protection
+        X-XSS-Protection "1; mode=block"
+        
+        # Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+        
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        
+        # Content Security Policy
+        Content-Security-Policy "default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN} https://{$DOMAIN}; media-src 'self' blob:; object-src 'none'; frame-ancestors 'self';"
+        
+        # Permissions policy
+        Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(self), payment=(), usb=()"
+        
+        # HSTS (HTTP Strict Transport Security)
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    }
+    
+    # Rate limiting
+    rate_limit {
+        zone dynamic {
+            key {remote_host}
+            events 100
+            window 1m
+        }
+    }
+    
+    # Logging without personal data
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MB
+            roll_keep 3
+        }
+        format json {
+            time_format "iso8601"
+            # Exclude IP addresses and personal data
+            delete request>headers>User-Agent
+            delete request>headers>Cookie
+            delete request>remote_ip
+        }
+    }
+    
+    # WebSocket endpoint (Bonfire)
+    @websocket {
+        path /ws*
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    handle @websocket {
+        reverse_proxy bonfire:9000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # REST API endpoint (Delta)
+    handle /api* {
+        reverse_proxy delta:8000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            
+            # Timeouts
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 30s
+            }
+        }
+    }
+    
+    # Voice server endpoint (Vortex)
+    handle /voice* {
+        reverse_proxy vortex:9001 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # File storage endpoint (MinIO)
+    handle /files* {
+        reverse_proxy minio:9000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # Web frontend (January) - catch-all
+    handle {
+        reverse_proxy january:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # Error handling
+    handle_errors {
+        @5xx expression `{err.status_code} >= 500 && {err.status_code} < 600`
+        handle @5xx {
+            respond "Service temporarily unavailable" 503
+        }
+        
+        @4xx expression `{err.status_code} >= 400 && {err.status_code} < 500`
+        handle @4xx {
+            respond "Not found" 404
+        }
+    }
+}
+
+# Health check endpoint (internal only)
+:8080 {
+    respond /health "OK" 200
+}
