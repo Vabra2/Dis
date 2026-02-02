@@ -1,0 +1,299 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Database Services
+  # ============================================
+  
+  # MongoDB - Main database with encryption
+  mongodb:
+    image: mongo:7.0
+    container_name: dis-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE}
+    volumes:
+      - ./data/mongodb:/data/db
+      - ./database/mongodb/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    command: --wiredTigerCacheSizeGB 1.5 --quiet
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis - Cache and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: dis-redis
+    restart: unless-stopped
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./data/redis:/data
+      - ./database/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # MinIO - S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: dis-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # MinIO bucket creation
+  minio-init:
+    image: minio/mc:latest
+    container_name: dis-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      /usr/bin/mc alias set minio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      /usr/bin/mc mb --ignore-existing minio/${MINIO_BUCKET};
+      /usr/bin/mc anonymous set download minio/${MINIO_BUCKET};
+      exit 0;
+      "
+    networks:
+      - dis-network
+
+  # ============================================
+  # Revolt Services
+  # ============================================
+
+  # Delta - REST API server
+  delta:
+    image: ghcr.io/revoltchat/delta:latest
+    container_name: dis-delta
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - redis
+      - minio
+    environment:
+      # Database
+      MONGODB_URI: mongodb://${MONGODB_USERNAME}:${MONGODB_PASSWORD}@mongodb:27017/${MONGODB_DATABASE}
+      REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379
+      
+      # Storage
+      AUTUMN_URL: http://minio:9000
+      JANUARY_URL: http://january:3000
+      
+      # Security
+      REVOLT_APP_URL: ${PROTOCOL}://${DOMAIN}
+      REVOLT_PUBLIC_URL: ${PROTOCOL}://${DOMAIN}/api
+      REVOLT_UNSAFE_NO_EMAIL: "1"
+      
+      # Features
+      REVOLT_MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE}000000
+    ports:
+      - "8000:8000"
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Bonfire - WebSocket server
+  bonfire:
+    image: ghcr.io/revoltchat/bonfire:latest
+    container_name: dis-bonfire
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - redis
+    environment:
+      MONGODB_URI: mongodb://${MONGODB_USERNAME}:${MONGODB_PASSWORD}@mongodb:27017/${MONGODB_DATABASE}
+      REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379
+      REVOLT_APP_URL: ${PROTOCOL}://${DOMAIN}
+    ports:
+      - "9000:9000"
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # January - Web frontend
+  january:
+    image: ghcr.io/revoltchat/client:latest
+    container_name: dis-january
+    restart: unless-stopped
+    environment:
+      REVOLT_API_URL: ${PROTOCOL}://${DOMAIN}/api
+      REVOLT_WS_URL: ${PROTOCOL}://${DOMAIN}/ws
+    ports:
+      - "3000:3000"
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Vortex - Voice server (WebRTC)
+  vortex:
+    image: ghcr.io/revoltchat/vortex:latest
+    container_name: dis-vortex
+    restart: unless-stopped
+    environment:
+      VORTEX_HOST: 0.0.0.0
+      VORTEX_PORT: 9001
+      VORTEX_EXTERNAL_HOST: ${VORTEX_EXTERNAL_HOST}
+      VORTEX_EXTERNAL_PORT: ${VORTEX_EXTERNAL_PORT}
+    ports:
+      - "9001:9001"
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================
+  # Custom Services
+  # ============================================
+
+  # Email service (optional)
+  email-service:
+    build:
+      context: ./email
+      dockerfile: Dockerfile
+    container_name: dis-email
+    restart: unless-stopped
+    environment:
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_USE_TLS: ${SMTP_USE_TLS}
+      EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY}
+      MONGODB_URI: mongodb://${MONGODB_USERNAME}:${MONGODB_PASSWORD}@mongodb:27017/${MONGODB_DATABASE}
+    depends_on:
+      - mongodb
+    networks:
+      - dis-network
+    profiles:
+      - email
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Log anonymizer
+  log-anonymizer:
+    build:
+      context: ./logs
+      dockerfile: Dockerfile
+    container_name: dis-log-anonymizer
+    restart: unless-stopped
+    environment:
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS}
+      LOG_LEVEL: ${LOG_LEVEL}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - dis-network
+    profiles:
+      - logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================
+  # Infrastructure Services
+  # ============================================
+
+  # Caddy - Reverse proxy with auto-HTTPS
+  caddy:
+    image: caddy:2-alpine
+    container_name: dis-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+      - ./data/caddy-config:/config
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    depends_on:
+      - delta
+      - bonfire
+      - january
+      - vortex
+    networks:
+      - dis-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Tor Hidden Service
+  tor:
+    image: goldy/tor-hidden-service:latest
+    container_name: dis-tor
+    restart: unless-stopped
+    environment:
+      SERVICE1_NAME: dis-chat
+      SERVICE1_TOR_SERVICE_HOSTS: 80:caddy:80
+    volumes:
+      - ./data/tor:/var/lib/tor/hidden_service/
+    depends_on:
+      - caddy
+    networks:
+      - dis-network
+    profiles:
+      - tor
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  dis-network:
+    driver: bridge
+
+volumes:
+  mongodb-data:
+  redis-data:
+  minio-data:
+  caddy-data:
+  tor-data:
